@@ -324,7 +324,13 @@ class UniBEV(MVXTwoStageDetector):
         losses.update(losses_pts)
         return losses
 
-    def forward_test(self, img_metas, img=None, points=None, radar=None, **kwargs):
+    def forward_test(
+        self, data_samples: List, inputs: Dict, mode: str, img_metas=None, img=None, points=None, radar=None, **kwargs
+    ):
+
+        img = torch.stack(inputs["img"]) if "img" in inputs else None
+        points = torch.stack(inputs["points"]) if "points" in inputs else None
+        img_metas = [item.metainfo for item in data_samples]
 
         for var, name in [(img_metas, "img_metas")]:
             if not isinstance(var, list):
@@ -340,7 +346,7 @@ class UniBEV(MVXTwoStageDetector):
         points = [points] if points is None else points
         radar = [radar] if radar is None else radar
 
-        bbox_results, bev_embeds = self.simple_test(points[0], img_metas[0], img[0], radar[0], **kwargs)
+        bbox_results, bev_embeds = self.simple_test(points, img_metas, img, radar, **kwargs)
         return bbox_results
 
     def simple_test(self, points, img_metas, img=None, radar=None, rescale=False):
