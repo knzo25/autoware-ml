@@ -83,7 +83,7 @@ data_prefix = dict(
 
 # runner = dict(type='EpochBasedRunner',
 #              max_epochs=max_epochs)
-train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=5)
+train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 val_cfg = dict()
 test_cfg = dict()
 

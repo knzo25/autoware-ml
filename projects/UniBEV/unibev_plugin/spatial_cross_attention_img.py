@@ -306,6 +306,7 @@ class MSDeformableAttention3DImg(BaseModule):
         xavier_init(self.value_proj, distribution="uniform", bias=0.0)
         xavier_init(self.output_proj, distribution="uniform", bias=0.0)
         self._is_init = True
+        self.to(torch.cuda.current_device())
 
     def forward(
         self,

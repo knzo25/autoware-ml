@@ -1,6 +1,6 @@
 import copy
 import time
-from typing import Dict, List
+from typing import Dict, List, Union
 
 import mmdet3d
 import numpy as np
@@ -11,7 +11,10 @@ from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
 # from mmcv.runner import force_fp32, auto_fp16
 # from mmdet.models import DETECTORS
 from mmdet3d.registry import MODELS
+from mmdet3d.structures import Det3DDataSample
+from mmdet3d.structures.det3d_data_sample import ForwardResults, OptSampleList
 from mmdet3d.structures.ops import bbox3d2result
+from mmengine.structures import InstanceData
 from torch.nn import functional as F
 
 from .grid_mask import GridMask
@@ -213,38 +216,84 @@ class UniBEV(MVXTwoStageDetector):
         dummy_metas = None
         return self.forward_test(img=img, points=points, img_metas=[[dummy_metas]])
 
-    def forward(self, return_loss=True, **kwargs):
-        """Calls either forward_train or forward_test depending on whether
-        return_loss=True.
-        Note this setting will change the expected inputs. When
-        `return_loss=True`, img and img_metas are single-nested (i.e.
-        torch.Tensor and list[dict]), and when `resturn_loss=False`, img and
-        img_metas should be double nested (i.e.  list[torch.Tensor],
-        list[list[dict]]), with the outer list indicating test time
-        augmentations.
-        """
-        if return_loss:
-            return self.forward_train(**kwargs)
-        else:
-            return self.forward_test(**kwargs)
+    def forward(
+        self, inputs: Union[dict, List[dict]], data_samples: OptSampleList = None, mode: str = "tensor", **kwargs
+    ) -> ForwardResults:
+        """The unified entry for a forward process in both training and test.
 
-    def forward_train(
+        The method should accept three modes: "tensor", "predict" and "loss":
+
+        - "tensor": Forward the whole network and return tensor or tuple of
+        tensor without any post-processing, same as a common nn.Module.
+        - "predict": Forward and return the predictions, which are fully
+        processed to a list of :obj:`Det3DDataSample`.
+        - "loss": Forward and return a dict of losses according to the given
+        inputs and data samples.
+
+        Note that this method doesn't handle neither back propagation nor
+        optimizer updating, which are done in the :meth:`train_step`.
+
+        Args:
+            inputs  (dict | list[dict]): When it is a list[dict], the
+                outer list indicate the test time augmentation. Each
+                dict contains batch inputs
+                which include 'points' and 'imgs' keys.
+
+                - points (list[torch.Tensor]): Point cloud of each sample.
+                - imgs (torch.Tensor): Image tensor has shape (B, C, H, W).
+            data_samples (list[:obj:`Det3DDataSample`],
+                list[list[:obj:`Det3DDataSample`]], optional): The
+                annotation data of every samples. When it is a list[list], the
+                outer list indicate the test time augmentation, and the
+                inter list indicate the batch. Otherwise, the list simply
+                indicate the batch. Defaults to None.
+            mode (str): Return what kind of value. Defaults to 'tensor'.
+
+        Returns:
+            The return type depends on ``mode``.
+
+            - If ``mode="tensor"``, return a tensor or a tuple of tensor.
+            - If ``mode="predict"``, return a list of :obj:`Det3DDataSample`.
+            - If ``mode="loss"``, return a dict of tensor.
+        """
+        # predict = self.predict(inputs, data_samples, **kwargs)
+        if isinstance(inputs, dict) and data_samples is None:
+            data_samples = inputs["data_samples"]
+            inputs = inputs["inputs"]
+
+        if mode == "loss":
+            return self.loss(inputs, data_samples, **kwargs)
+        elif mode == "predict":
+            if isinstance(data_samples[0], list):
+                # aug test
+                assert len(data_samples[0]) == 1, (
+                    "Only support " "batch_size 1 " "in mmdet3d when " "do the test" "time augmentation."
+                )
+                return self.aug_test(inputs, data_samples, **kwargs)
+            else:
+                return self.predict(inputs, data_samples, **kwargs)
+        elif mode == "tensor":
+            return self._forward(inputs, data_samples, **kwargs)
+        else:
+            raise RuntimeError(f'Invalid mode "{mode}". ' "Only supports loss, predict and tensor mode")
+
+    def loss(
         self,
-        data_samples: List,
         inputs: Dict,
-        mode: str,
-        points=None,
-        img_metas=None,
-        gt_bboxes_3d=None,
-        gt_labels_3d=None,
-        gt_labels=None,
-        gt_bboxes=None,
-        img=None,
-        radar=None,
-        proposals=None,
-        gt_bboxes_ignore=None,
-        img_depth=None,
-        img_mask=None,
+        data_samples: List,
+        # mode: str,
+        # points=None,
+        # img_metas=None,
+        # gt_bboxes_3d=None,
+        # gt_labels_3d=None,
+        # gt_labels=None,
+        # gt_bboxes=None,
+        # img=None,
+        # radar=None,
+        # proposals=None,
+        # gt_bboxes_ignore=None,
+        # img_depth=None,
+        # img_mask=None,
         **kwargs,
     ):
         """Forward training function.
@@ -271,7 +320,8 @@ class UniBEV(MVXTwoStageDetector):
             dict: Losses of different branches.
         """
         img = torch.stack(inputs["img"]) if "img" in inputs else None
-        points = torch.stack(inputs["points"]) if "points" in inputs else None
+        points = inputs["points"] if "points" in inputs else None
+        radar = torch.stack(inputs["radar"]) if "radar" in inputs else None
         img_metas = [item.metainfo for item in data_samples]
 
         batch_input_metas, batch_gt_instances_3d = [], []
@@ -324,12 +374,21 @@ class UniBEV(MVXTwoStageDetector):
         losses.update(losses_pts)
         return losses
 
-    def forward_test(
-        self, data_samples: List, inputs: Dict, mode: str, img_metas=None, img=None, points=None, radar=None, **kwargs
+    def predict(
+        self,
+        inputs: Dict,
+        data_samples: List,
+        # mode: str,
+        # img_metas=None,
+        # img=None,
+        # points=None,
+        # radar=None,
+        **kwargs,
     ):
 
         img = torch.stack(inputs["img"]) if "img" in inputs else None
-        points = torch.stack(inputs["points"]) if "points" in inputs else None
+        points = inputs["points"] if "points" in inputs else None
+        radar = torch.stack(inputs["radar"]) if "radar" in inputs else None
         img_metas = [item.metainfo for item in data_samples]
 
         for var, name in [(img_metas, "img_metas")]:
@@ -347,7 +406,19 @@ class UniBEV(MVXTwoStageDetector):
         radar = [radar] if radar is None else radar
 
         bbox_results, bev_embeds = self.simple_test(points, img_metas, img, radar, **kwargs)
-        return bbox_results
+
+        ret_layer = []
+        for bbox_result in bbox_results:
+            temp_instances = InstanceData()
+            temp_instances.bboxes_3d = bbox_result["pts_bbox"]["bboxes_3d"]
+            temp_instances.scores_3d = bbox_result["pts_bbox"]["scores_3d"]
+            temp_instances.labels_3d = bbox_result["pts_bbox"]["labels_3d"]
+
+            ret_layer.append(temp_instances)
+
+        res = self.add_pred_to_datasample(data_samples, ret_layer)
+
+        return res
 
     def simple_test(self, points, img_metas, img=None, radar=None, rescale=False):
         """Test function without augmentaiton."""

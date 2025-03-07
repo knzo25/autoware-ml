@@ -123,7 +123,14 @@ class ImgEncoder(TransformerLayerSequence):
 
         lidar2img = []
         for img_meta in img_metas:
-            lidar2img.append(img_meta["lidar2img"])
+
+            lidar2img_single = []
+            for cam2image, lidar2cam in zip(img_meta["cam2img"], img_meta["lidar2cam"]):
+                cam2image_aux = np.eye(4)
+                cam2image_aux[:3, :3] = np.array(cam2image)
+                lidar2img_single.append(cam2image_aux @ np.array(lidar2cam))
+
+            lidar2img.append(lidar2img_single)
         lidar2img = np.asarray(lidar2img)  # (B, N, 4, 4)
         # ## debug
         # print('In Point Sampling: '
