@@ -10,6 +10,8 @@ enable_amp = True
 grid_size = 0.05  # original is 0.05
 num_classes = 6
 
+point_cloud_range = [-122.4, -122.4, -4.0, 122.4, 122.4, 8.0]
+
 # model settings
 model = dict(
     type="DefaultSegmentorV2",
@@ -98,8 +100,7 @@ data = dict(
             dict(type="RandomScale", scale=[0.9, 1.1]),
             dict(
                 type="PointClip",
-                # point_cloud_range=(-76.8, -76.8, -4, 76.8, 76.8, 8),
-                point_cloud_range=(-122.4, -122.4, -4, 122.4, 122.4, 8),
+                    point_cloud_range=point_cloud_range,
             ),
             # dict(type="RandomShift", shift=[0.2, 0.2, 0.2]),
             dict(type="RandomFlip", p=0.5),
@@ -131,6 +132,10 @@ data = dict(
         data_root=data_root,
         transform=[
             # dict(type="PointClip", point_cloud_range=(-51.2, -51.2, -4, 51.2, 51.2, 2.4)),
+            dict(
+                type="PointClip",
+                    point_cloud_range=point_cloud_range,
+            ),
             dict(
                 type="GridSample",
                 grid_size=grid_size,

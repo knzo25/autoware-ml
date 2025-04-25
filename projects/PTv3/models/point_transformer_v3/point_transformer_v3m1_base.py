@@ -25,6 +25,19 @@ from models.utils.misc import offset2bincount
 from models.utils.structure import Point
 from models.modules import PointModule, PointSequential
 
+#NOTE(knzo25): hack to use exportable spconv when available
+
+try:
+
+    from SparseConvolution.sparse_conv import SparseConv3d, SubMConv3d
+    print("Using spconv2.0 with export support")
+
+except ImportError:
+
+    from spconv.pytorch import (
+        SparseConv3d,
+        SubMConv3d,
+    )
 
 class RPE(torch.nn.Module):
     def __init__(self, patch_size, num_heads):
@@ -275,7 +288,7 @@ class Block(PointModule):
         self.pre_norm = pre_norm
 
         self.cpe = PointSequential(
-            spconv.SubMConv3d(
+            SubMConv3d(
                 channels,
                 channels,
                 kernel_size=3,
@@ -339,22 +352,23 @@ class Block(PointModule):
 
 
 class SerializedPooling(PointModule):
+
     def __init__(
-        self,
-        in_channels,
-        out_channels,
-        stride=2,
-        norm_layer=None,
-        act_layer=None,
-        reduce="max",
-        shuffle_orders=True,
-        traceable=True,  # record parent and cluster
+            self,
+            in_channels,
+            out_channels,
+            stride=2,
+            norm_layer=None,
+            act_layer=None,
+            reduce="max",
+            shuffle_orders=True,
+            traceable=True,  # record parent and cluster
     ):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
 
-        assert stride == 2 ** (math.ceil(stride) - 1).bit_length()  # 2, 4, 8
+        assert stride == 2**(math.ceil(stride) - 1).bit_length()  # 2, 4, 8
         # TODO: add support to grid pool (any stride)
         self.stride = stride
         assert reduce in ["sum", "mean", "min", "max"]
@@ -377,9 +391,11 @@ class SerializedPooling(PointModule):
             "serialized_order",
             "serialized_inverse",
             "serialized_depth",
-        }.issubset(
-            point.keys()
-        ), "Run point.serialization() point cloud before SerializedPooling"
+            "sparse_shape"
+        }.issubset(point.keys(
+        )), "Run point.serialization() point cloud before SerializedPooling"
+
+        sparse_shape = point.sparse_shape
 
         code = point.serialized_code >> pooling_depth * 3
         code_, cluster, counts = torch.unique(
@@ -400,9 +416,8 @@ class SerializedPooling(PointModule):
         inverse = torch.zeros_like(order).scatter_(
             dim=1,
             index=order,
-            src=torch.arange(0, code.shape[1], device=order.device).repeat(
-                code.shape[0], 1
-            ),
+            src=torch.arange(0, code.shape[1],
+                             device=order.device).repeat(code.shape[0], 1),
         )
 
         if self.shuffle_orders:
@@ -412,19 +427,53 @@ class SerializedPooling(PointModule):
             inverse = inverse[perm]
 
         # collect information
+        assert self.reduce == "max"
+        diff = idx_ptr[1:] - idx_ptr[0:-1]  # idx_ptr.diff()
+        segment_indices = torch.arange(
+            idx_ptr.size(0) - 1, device=idx_ptr.device).repeat_interleave(diff)
+
+        feat_src = self.proj(point.feat)[indices]
+        feat_max = torch.full((idx_ptr.size(0) - 1, feat_src.size(1)),
+                              torch.finfo(feat_src.dtype).min,
+                              dtype=torch.float32,
+                              device=feat_src.device)
+        feat_max.scatter_reduce_(0,
+                                 segment_indices.unsqueeze(1).expand(
+                                     -1, feat_src.size(1)),
+                                 feat_src,
+                                 reduce='amax',
+                                 include_self=True)
+
+        coord_src = point.coord[indices]
+        coord_mean = torch.full((idx_ptr.size(0) - 1, coord_src.size(1)),
+                                0,
+                                dtype=torch.float32,
+                                device=coord_src.device)
+        coord_mean.scatter_reduce_(0,
+                                   segment_indices.unsqueeze(1).expand(
+                                       -1, coord_src.size(1)),
+                                   coord_src,
+                                   reduce="mean",
+                                   include_self=False)
+
+        #feat_gt = feat=torch_scatter.segment_csr(self.proj(point.feat)[indices], idx_ptr, reduce=self.reduce)
+
         point_dict = Dict(
-            feat=torch_scatter.segment_csr(
-                self.proj(point.feat)[indices], idx_ptr, reduce=self.reduce
-            ),
-            coord=torch_scatter.segment_csr(
-                point.coord[indices], idx_ptr, reduce="mean"
-            ),
+            #feat=torch_scatter.segment_csr(self.proj(point.feat)[indices],
+            #                               idx_ptr,
+            #                               reduce=self.reduce),
+            #coord=torch_scatter.segment_csr(point.coord[indices],
+            #                                idx_ptr,
+            #                                reduce="mean"),
+            feat=feat_max,
+            coord=coord_mean,
             grid_coord=point.grid_coord[head_indices] >> pooling_depth,
             serialized_code=code,
             serialized_order=order,
             serialized_inverse=inverse,
             serialized_depth=point.serialized_depth - pooling_depth,
             batch=point.batch[head_indices],
+            sparse_shape=sparse_shape >> pooling_depth,
         )
 
         if "condition" in point.keys():
@@ -496,7 +545,7 @@ class Embedding(PointModule):
 
         # TODO: check remove spconv
         self.stem = PointSequential(
-            conv=spconv.SubMConv3d(
+            conv=SubMConv3d(
                 in_channels,
                 embed_channels,
                 kernel_size=5,
@@ -517,38 +566,39 @@ class Embedding(PointModule):
 
 @MODELS.register_module("PT-v3m1")
 class PointTransformerV3(PointModule):
+
     def __init__(
-        self,
-        in_channels=6,
-        order=("z", "z-trans"),
-        stride=(2, 2, 2, 2),
-        enc_depths=(2, 2, 2, 6, 2),
-        enc_channels=(32, 64, 128, 256, 512),
-        enc_num_head=(2, 4, 8, 16, 32),
-        enc_patch_size=(48, 48, 48, 48, 48),
-        dec_depths=(2, 2, 2, 2),
-        dec_channels=(64, 64, 128, 256),
-        dec_num_head=(4, 4, 8, 16),
-        dec_patch_size=(48, 48, 48, 48),
-        mlp_ratio=4,
-        qkv_bias=True,
-        qk_scale=None,
-        attn_drop=0.0,
-        proj_drop=0.0,
-        drop_path=0.3,
-        pre_norm=True,
-        shuffle_orders=True,
-        enable_rpe=False,
-        enable_flash=True,
-        upcast_attention=False,
-        upcast_softmax=False,
-        cls_mode=False,
-        pdnorm_bn=False,
-        pdnorm_ln=False,
-        pdnorm_decouple=True,
-        pdnorm_adaptive=False,
-        pdnorm_affine=True,
-        pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
+            self,
+            in_channels=6,
+            order=("z", "z-trans"),
+            stride=(2, 2, 2, 2),
+            enc_depths=(2, 2, 2, 6, 2),
+            enc_channels=(32, 64, 128, 256, 512),
+            enc_num_head=(2, 4, 8, 16, 32),
+            enc_patch_size=(48, 48, 48, 48, 48),
+            dec_depths=(2, 2, 2, 2),
+            dec_channels=(64, 64, 128, 256),
+            dec_num_head=(4, 4, 8, 16),
+            dec_patch_size=(48, 48, 48, 48),
+            mlp_ratio=4,
+            qkv_bias=True,
+            qk_scale=None,
+            attn_drop=0.0,
+            proj_drop=0.0,
+            drop_path=0.3,
+            pre_norm=True,
+            shuffle_orders=True,
+            enable_rpe=False,
+            enable_flash=True,
+            upcast_attention=False,
+            upcast_softmax=False,
+            cls_mode=False,
+            pdnorm_bn=False,
+            pdnorm_ln=False,
+            pdnorm_decouple=True,
+            pdnorm_adaptive=False,
+            pdnorm_affine=True,
+            pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
@@ -570,9 +620,10 @@ class PointTransformerV3(PointModule):
         if pdnorm_bn:
             bn_layer = partial(
                 PDNorm,
-                norm_layer=partial(
-                    nn.BatchNorm1d, eps=1e-3, momentum=0.01, affine=pdnorm_affine
-                ),
+                norm_layer=partial(nn.BatchNorm1d,
+                                   eps=1e-3,
+                                   momentum=0.01,
+                                   affine=pdnorm_affine),
                 conditions=pdnorm_conditions,
                 decouple=pdnorm_decouple,
                 adaptive=pdnorm_adaptive,
@@ -583,7 +634,8 @@ class PointTransformerV3(PointModule):
         if pdnorm_ln:
             ln_layer = partial(
                 PDNorm,
-                norm_layer=partial(nn.LayerNorm, elementwise_affine=pdnorm_affine),
+                norm_layer=partial(nn.LayerNorm,
+                                   elementwise_affine=pdnorm_affine),
                 conditions=pdnorm_conditions,
                 decouple=pdnorm_decouple,
                 adaptive=pdnorm_adaptive,
@@ -606,9 +658,8 @@ class PointTransformerV3(PointModule):
         ]
         self.enc = PointSequential()
         for s in range(self.num_stages):
-            enc_drop_path_ = enc_drop_path[
-                sum(enc_depths[:s]) : sum(enc_depths[: s + 1])
-            ]
+            enc_drop_path_ = enc_drop_path[sum(enc_depths[:s]
+                                               ):sum(enc_depths[:s + 1])]
             enc = PointSequential()
             if s > 0:
                 enc.add(
@@ -618,6 +669,7 @@ class PointTransformerV3(PointModule):
                         stride=stride[s - 1],
                         norm_layer=bn_layer,
                         act_layer=act_layer,
+                        shuffle_orders=shuffle_orders,
                     ),
                     name="down",
                 )
@@ -656,9 +708,8 @@ class PointTransformerV3(PointModule):
             self.dec = PointSequential()
             dec_channels = list(dec_channels) + [enc_channels[-1]]
             for s in reversed(range(self.num_stages - 1)):
-                dec_drop_path_ = dec_drop_path[
-                    sum(dec_depths[:s]) : sum(dec_depths[: s + 1])
-                ]
+                dec_drop_path_ = dec_drop_path[sum(dec_depths[:s]
+                                                   ):sum(dec_depths[:s + 1])]
                 dec_drop_path_.reverse()
                 dec = PointSequential()
                 dec.add(
@@ -699,11 +750,13 @@ class PointTransformerV3(PointModule):
 
     def forward(self, data_dict):
         point = Point(data_dict)
-        point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
+        point.serialization(order=self.order,
+                            shuffle_orders=self.shuffle_orders)
         point.sparsify()
 
         point = self.embedding(point)
         point = self.enc(point)
+
         if not self.cls_mode:
             point = self.dec(point)
         # else:
@@ -712,4 +765,23 @@ class PointTransformerV3(PointModule):
         #         indptr=nn.functional.pad(point.offset, (1, 0)),
         #         reduce="mean",
         #     )
+        return point
+
+    def export_forward(self, data_dict):
+        point = Point(data_dict)
+        #point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
+        point["serialized_depth"] = data_dict["serialized_depth"]
+        point["serialized_code"] = data_dict["serialized_code"]
+        point["serialized_order"] = data_dict["serialized_order"]
+        point["serialized_inverse"] = data_dict["serialized_inverse"]
+        point["sparse_shape"] = data_dict["sparse_shape"]
+        point.sparsify()
+
+        point = self.embedding(point)
+
+        point = self.enc(point)
+
+        if not self.cls_mode:
+            point = self.dec(point)
+
         return point
