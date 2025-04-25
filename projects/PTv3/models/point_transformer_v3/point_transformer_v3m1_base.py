@@ -578,7 +578,8 @@ class PointTransformerV3(PointModule):
                 adaptive=pdnorm_adaptive,
             )
         else:
-            bn_layer = partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01)
+            bn_layer = partial(nn.LayerNorm, eps=1e-3)
+            #bn_layer = partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01)
         if pdnorm_ln:
             ln_layer = partial(
                 PDNorm,

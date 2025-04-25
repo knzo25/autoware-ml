@@ -7,7 +7,7 @@ mix_prob = 0.8
 empty_cache = False
 enable_amp = True
 
-grid_size = 0.1 # original is 0.05
+grid_size = 0.05  # original is 0.05
 num_classes = 6
 
 # model settings
@@ -96,12 +96,11 @@ data = dict(
             # dict(type="RandomRotate", angle=[-1/6, 1/6], axis="x", p=0.5),
             # dict(type="RandomRotate", angle=[-1/6, 1/6], axis="y", p=0.5),
             dict(type="RandomScale", scale=[0.9, 1.1]),
-
             dict(
                 type="PointClip",
-                    point_cloud_range=(-76.8, -76.8, -4, 76.8, 76.8, 8),
+                # point_cloud_range=(-76.8, -76.8, -4, 76.8, 76.8, 8),
+                point_cloud_range=(-122.4, -122.4, -4, 122.4, 122.4, 8),
             ),
-
             # dict(type="RandomShift", shift=[0.2, 0.2, 0.2]),
             dict(type="RandomFlip", p=0.5),
             dict(type="RandomJitter", sigma=0.005, clip=0.02),
@@ -114,7 +113,7 @@ data = dict(
                 keys=("coord", "strength", "segment"),
                 return_grid_coord=True,
             ),
-            dict(type="SphereCrop", point_max=128000, mode="random"),
+            dict(type="SphereCrop", point_max=192000, mode="random"),
             # dict(type="CenterShift", apply_z=False),
             dict(type="ToTensor"),
             dict(

@@ -19,5 +19,6 @@ RUN conda install h5py pyyaml -c anaconda -y
 RUN conda install sharedarray tensorboard tensorboardx yapf addict einops scipy plyfile termcolor timm -c conda-forge -y
 RUN conda install pytorch-cluster pytorch-scatter pytorch-sparse -c pyg -y
 
-RUN python3 -m pip --no-cache-dir --force-reinstall install \ 
-    yapf==0.40.1
+#RUN python3 -m pip --no-cache-dir --force-reinstall install \
+#    yapf==0.40.1
+# TODO(knzo25): see if removing yapf from the conda installation fixes the problem
