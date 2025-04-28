@@ -49,6 +49,8 @@ model = dict(
         pdnorm_adaptive=False,
         pdnorm_affine=True,
         pdnorm_conditions=("nuScenes", "SemanticKITTI", "Waymo"),
+        point_cloud_range=point_cloud_range,
+        voxel_size=grid_size,
     ),
     criteria=[
         dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),

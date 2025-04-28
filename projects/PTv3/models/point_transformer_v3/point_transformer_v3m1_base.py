@@ -427,7 +427,7 @@ class SerializedPooling(PointModule):
             inverse = inverse[perm]
 
         # collect information
-        assert self.reduce == "max"
+        """assert self.reduce == "max"
         diff = idx_ptr[1:] - idx_ptr[0:-1]  # idx_ptr.diff()
         segment_indices = torch.arange(
             idx_ptr.size(0) - 1, device=idx_ptr.device).repeat_interleave(diff)
@@ -435,7 +435,7 @@ class SerializedPooling(PointModule):
         feat_src = self.proj(point.feat)[indices]
         feat_max = torch.full((idx_ptr.size(0) - 1, feat_src.size(1)),
                               torch.finfo(feat_src.dtype).min,
-                              dtype=torch.float32,
+                              dtype=feat_src.dtype,
                               device=feat_src.device)
         feat_max.scatter_reduce_(0,
                                  segment_indices.unsqueeze(1).expand(
@@ -454,19 +454,19 @@ class SerializedPooling(PointModule):
                                        -1, coord_src.size(1)),
                                    coord_src,
                                    reduce="mean",
-                                   include_self=False)
+                                   include_self=False)"""
 
         #feat_gt = feat=torch_scatter.segment_csr(self.proj(point.feat)[indices], idx_ptr, reduce=self.reduce)
 
         point_dict = Dict(
-            #feat=torch_scatter.segment_csr(self.proj(point.feat)[indices],
-            #                               idx_ptr,
-            #                               reduce=self.reduce),
-            #coord=torch_scatter.segment_csr(point.coord[indices],
-            #                                idx_ptr,
-            #                                reduce="mean"),
-            feat=feat_max,
-            coord=coord_mean,
+            feat=torch_scatter.segment_csr(self.proj(point.feat)[indices],
+                                           idx_ptr,
+                                           reduce=self.reduce),
+            coord=torch_scatter.segment_csr(point.coord[indices],
+                                            idx_ptr,
+                                            reduce="mean"),
+            #feat=feat_max,
+            #coord=coord_mean,
             grid_coord=point.grid_coord[head_indices] >> pooling_depth,
             serialized_code=code,
             serialized_order=order,
@@ -599,6 +599,8 @@ class PointTransformerV3(PointModule):
             pdnorm_adaptive=False,
             pdnorm_affine=True,
             pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
+            point_cloud_range=None,
+            voxel_size=None,
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
@@ -615,6 +617,15 @@ class PointTransformerV3(PointModule):
         assert self.cls_mode or self.num_stages == len(dec_channels) + 1
         assert self.cls_mode or self.num_stages == len(dec_num_head) + 1
         assert self.cls_mode or self.num_stages == len(dec_patch_size) + 1
+        assert point_cloud_range
+        assert voxel_size
+
+        # Hack to add the poincloud ranges
+        self.point_cloud_range = torch.tensor(point_cloud_range, dtype=torch.float32).cuda()
+        self.voxel_size = torch.tensor([voxel_size, voxel_size, voxel_size], dtype=torch.float32).cuda()
+
+        self.sparse_shape = (self.point_cloud_range[3:] - self.point_cloud_range[:3]) / self.voxel_size
+        self.sparse_shape = torch.round(self.sparse_shape).long().cuda()
 
         # norm layers
         if pdnorm_bn:
@@ -749,7 +760,11 @@ class PointTransformerV3(PointModule):
                 self.dec.add(module=dec, name=f"dec{s}")
 
     def forward(self, data_dict):
+
+        # Hack to add the poincloud ranges
+        data_dict["sparse_shape"] = torch.round(self.sparse_shape).long().cuda()
         point = Point(data_dict)
+
         point.serialization(order=self.order,
                             shuffle_orders=self.shuffle_orders)
         point.sparsify()
